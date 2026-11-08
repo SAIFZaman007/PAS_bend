@@ -1,0 +1,347 @@
+"""Installer and admin authentication.
+
+Two ways to hold a session:
+- `/auth/login`, `/auth/refresh`, `/auth/logout`: tokens in the JSON body, for server-side
+  clients such as the public website (which keeps them in its own httpOnly cookies).
+- `/auth/session`: for the Dashboard app in the browser. The refresh token is set as an
+  httpOnly, path-scoped cookie (one per role, so an admin and an installer can be signed in
+  to the Dashboard in the same browser without ever mixing up) and never reaches JavaScript;
+  the short-lived access token is returned in the body and kept in memory. Refreshing
+  requires the `X-Requested-With` header, which a cross-site form cannot send and which CORS
+  only allows from the configured origins, so the cookie cannot be used for cross-site
+  request forgery.
+"""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from fastapi.responses import JSONResponse
+
+from app.api.deps import CurrentUserDep, EmailQueueDep, GeocoderDep, SessionDep, SettingsDep
+from app.core.config import Settings
+from app.core.enums import Role
+from app.core.exceptions import NotAuthenticatedError, error_response
+from app.core.rate_limit import rate_limit
+from app.models import User
+from app.schemas.auth import (
+    AccessToken,
+    ChangePasswordRequest,
+    ClaimAccount,
+    ClaimPreview,
+    DashboardHandoff,
+    EmailRequest,
+    LoginRequest,
+    Me,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenPair,
+    TokenRequest,
+)
+from app.schemas.common import Message
+from app.schemas.team import InviteAccept, InvitePreview
+from app.services import auth, claims, team
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+_CHECK_YOUR_INBOX = Message(
+    message="If the details are valid, we have sent an email with the next steps."
+)
+
+
+@router.post(
+    "/register",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("register", "5/hour"))],
+)
+async def register(
+    data: RegisterRequest, session: SessionDep, geocoder: GeocoderDep, emails: EmailQueueDep
+) -> Message:
+    emails.send(await auth.register(session, data, geocoder))
+    return _CHECK_YOUR_INBOX
+
+
+@router.post("/verify-email")
+async def verify_email(data: TokenRequest, session: SessionDep) -> Message:
+    await auth.verify_email(session, data.token)
+    return Message(message="Your email address is confirmed. You can now sign in.")
+
+
+@router.post(
+    "/resend-verification",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("resend-verification", "5/hour"))],
+)
+async def resend_verification(
+    data: EmailRequest, session: SessionDep, emails: EmailQueueDep
+) -> Message:
+    emails.send(await auth.resend_verification(session, data.email))
+    return _CHECK_YOUR_INBOX
+
+
+@router.post("/login", dependencies=[Depends(rate_limit("login", "10/minute"))])
+async def login(data: LoginRequest, session: SessionDep) -> TokenPair:
+    return await auth.login(session, data.email, data.password)
+
+
+@router.post(
+    "/dashboard-handoff", dependencies=[Depends(rate_limit("dashboard-handoff", "20/minute"))]
+)
+async def dashboard_handoff(
+    user: CurrentUserDep, session: SessionDep, settings: SettingsDep
+) -> DashboardHandoff:
+    """Called by the website for a signed-in person: the Dashboard address to open."""
+    code = await auth.issue_dashboard_handoff(session, user)
+    return DashboardHandoff(url=f"{settings.dashboard_url}/sso?code={code}")
+
+
+@router.post("/refresh")
+async def refresh(data: RefreshRequest, session: SessionDep) -> TokenPair:
+    return await auth.refresh(session, data.refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(data: RefreshRequest, session: SessionDep) -> None:
+    await auth.logout(session, data.refresh_token)
+
+
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("forgot-password", "5/hour"))],
+)
+async def forgot_password(
+    data: EmailRequest, session: SessionDep, emails: EmailQueueDep
+) -> Message:
+    emails.send(await auth.forgot_password(session, data.email))
+    return _CHECK_YOUR_INBOX
+
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest, session: SessionDep) -> Message:
+    await auth.reset_password(session, data.token, data.password)
+    return Message(message="Your password has been changed. You can now sign in.")
+
+
+@router.get("/me")
+async def me(user: CurrentUserDep, session: SessionDep) -> Me:
+    return await auth.get_profile(session, user)
+
+
+@router.post("/change-password")
+async def change_password(
+    data: ChangePasswordRequest,
+    user: CurrentUserDep,
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+) -> AccessToken:
+    """Change the password. Every session ends; a new one is started for this device."""
+    await auth.change_password(session, user, data.current_password, data.new_password)
+    tokens = await auth.new_session(session, user)
+    _set_refresh_cookie(response, tokens.refresh_token, settings, user.role)
+    return await _access(session, user, tokens)
+
+
+# ---- Dashboard sessions (httpOnly refresh cookie) ---------------------------------------
+
+# One cookie per role. They are named apart from the public website's own `pas_refresh`
+# cookie: on a shared host (localhost, or one parent domain) two cookies with the same name
+# overwrite each other and one sign-in silently ends the other.
+_COOKIE_BY_ROLE: dict[Role, str] = {
+    Role.ADMIN: "pas_dash_admin",
+    Role.INSTALLER: "pas_dash_installer",
+}
+_LEGACY_COOKIE = "pas_refresh"  # the single cookie used before roles were split; only cleared
+_REFRESH_COOKIE_PATH = "/api/v1/auth/session"
+RequestedWith = Annotated[str | None, Header(alias="X-Requested-With")]
+# Which role's session a tab means. The Dashboard remembers it per tab, so two tabs can hold
+# an admin and an installer at once.
+RoleHint = Annotated[Role | None, Query(alias="role")]
+
+
+def _cookie_options(settings: Settings) -> dict[str, object]:
+    return {
+        "path": _REFRESH_COOKIE_PATH,
+        "domain": settings.session_cookie_domain,
+        "secure": settings.is_production or settings.session_cookie_samesite == "none",
+        "httponly": True,
+        "samesite": settings.session_cookie_samesite,
+    }
+
+
+def _set_refresh_cookie(response: Response, token: str, settings: Settings, role: Role) -> None:
+    response.set_cookie(
+        _COOKIE_BY_ROLE[role],
+        token,
+        max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        **_cookie_options(settings),  # type: ignore[arg-type]
+    )
+
+
+def _clear_refresh_cookie(response: Response, settings: Settings, role: Role | None) -> None:
+    options = _cookie_options(settings)
+    for name in ([_COOKIE_BY_ROLE[role]] if role else []) + [_LEGACY_COOKIE]:
+        response.delete_cookie(name, **options)  # type: ignore[arg-type]
+
+
+def _session_role(request: Request, hint: Role | None) -> Role | None:
+    """The role a request means: the hint, else the only role signed in. Never a guess."""
+    if hint:
+        return hint
+    present = [role for role, name in _COOKIE_BY_ROLE.items() if request.cookies.get(name)]
+    return present[0] if len(present) == 1 else None
+
+
+async def _replace_session(request: Request, session: SessionDep, role: Role) -> None:
+    """Signing in again as `role` ends that role's earlier Dashboard session in this browser."""
+    previous = request.cookies.get(_COOKIE_BY_ROLE[role])
+    if previous:
+        await auth.logout(session, previous)
+
+
+async def _access(session: SessionDep, user: User, tokens: TokenPair) -> AccessToken:
+    return AccessToken(
+        access_token=tokens.access_token,
+        expires_in=tokens.expires_in,
+        user=await auth.get_profile(session, user),
+    )
+
+
+def _expired_session(settings: Settings, role: Role | None) -> JSONResponse:
+    """A 401 that also deletes the refresh cookie (a raised error would not carry it)."""
+    error = auth.InvalidSessionError()
+    response = error_response(401, error.code, error.message, headers=error.headers)
+    _clear_refresh_cookie(response, settings, role)
+    return response
+
+
+def _require_ajax(requested_with: str | None) -> None:
+    if requested_with != "XMLHttpRequest":
+        raise NotAuthenticatedError("Missing X-Requested-With header.", code="invalid_request")
+
+
+@router.post("/session", dependencies=[Depends(rate_limit("login", "10/minute"))])
+async def start_session(
+    data: LoginRequest,
+    request: Request,
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+    requested_with: RequestedWith = None,
+) -> AccessToken:
+    """Sign in to the Dashboard."""
+    _require_ajax(requested_with)
+    tokens = await auth.login(session, data.email, data.password)
+    user = await auth.user_for_refresh_token(session, tokens.refresh_token)
+    if user is None:  # pragma: no cover - the session was just created
+        raise NotAuthenticatedError
+    await _replace_session(request, session, user.role)
+    _set_refresh_cookie(response, tokens.refresh_token, settings, user.role)
+    return await _access(session, user, tokens)
+
+
+@router.post("/session/handoff", dependencies=[Depends(rate_limit("session-handoff", "10/minute"))])
+async def accept_handoff(
+    data: TokenRequest,
+    request: Request,
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+    requested_with: RequestedWith = None,
+) -> AccessToken:
+    """Open the Dashboard with a code from `/auth/dashboard-handoff` (single use)."""
+    _require_ajax(requested_with)
+    tokens, user = await auth.exchange_dashboard_handoff(session, data.token)
+    await _replace_session(request, session, user.role)
+    _set_refresh_cookie(response, tokens.refresh_token, settings, user.role)
+    return await _access(session, user, tokens)
+
+
+@router.post("/session/refresh", response_model=AccessToken)
+async def refresh_session(
+    request: Request,
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+    role: RoleHint = None,
+    requested_with: RequestedWith = None,
+) -> AccessToken | JSONResponse:
+    """Rotate the refresh cookie and return a new access token.
+
+    Only the cookie of the role asked for is used: an admin session can never be handed to a
+    tab that is signed in as an installer, or the other way round.
+    """
+    _require_ajax(requested_with)
+    role = _session_role(request, role)
+    refresh_token = request.cookies.get(_COOKIE_BY_ROLE[role]) if role else None
+    if role is None or not refresh_token:
+        return _expired_session(settings, role)
+    try:
+        tokens = await auth.refresh(session, refresh_token)
+    except auth.InvalidSessionError:
+        return _expired_session(settings, role)
+    user = await auth.user_for_refresh_token(session, tokens.refresh_token)
+    if user is None or user.role != role:  # pragma: no cover - a tampered cookie
+        return _expired_session(settings, role)
+    _set_refresh_cookie(response, tokens.refresh_token, settings, role)
+    return await _access(session, user, tokens)
+
+
+@router.delete("/session", status_code=status.HTTP_204_NO_CONTENT)
+async def end_session(
+    request: Request,
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+    role: RoleHint = None,
+    requested_with: RequestedWith = None,
+) -> None:
+    """Sign out of the Dashboard (idempotent). Ends the given role, or every role if none."""
+    _require_ajax(requested_with)
+    for each in [role] if role else list(_COOKIE_BY_ROLE):
+        refresh_token = request.cookies.get(_COOKIE_BY_ROLE[each])
+        if refresh_token:
+            await auth.logout(session, refresh_token)
+        _clear_refresh_cookie(response, settings, each)
+
+
+# ---- Claiming a listing ------------------------------------------------------------------
+
+
+@router.get("/claim", dependencies=[Depends(rate_limit("claim-preview", "30/minute"))])
+async def preview_claim(token: str, session: SessionDep) -> ClaimPreview:
+    """The listing a claim link is for."""
+    installer = await claims.preview(session, token)
+    return ClaimPreview(
+        business_name=installer.business_name,
+        slug=installer.slug,
+        email=installer.contact_email or "",
+        town=installer.town,
+    )
+
+
+@router.post("/claim", dependencies=[Depends(rate_limit("claim", "10/hour"))])
+async def claim_listing(data: ClaimAccount, session: SessionDep) -> Message:
+    """Set a password and take over the listing; then sign in as usual."""
+    await claims.claim(session, data.token, data.password)
+    return Message(message="Your listing is now yours. Sign in to manage it.")
+
+
+# ---- Joining the team -------------------------------------------------------------------
+
+
+@router.get("/invite", dependencies=[Depends(rate_limit("invite-preview", "30/minute"))])
+async def preview_invite(token: str, session: SessionDep) -> InvitePreview:
+    """Who a team invitation is for (the accept page shows it)."""
+    user = await team.preview_invite(session, token)
+    if user.staff_role is None:  # pragma: no cover - admins always have a staff role
+        raise NotAuthenticatedError
+    return InvitePreview(email=user.email, full_name=user.full_name, staff_role=user.staff_role)
+
+
+@router.post("/accept-invite", dependencies=[Depends(rate_limit("invite-accept", "10/hour"))])
+async def accept_invite(data: InviteAccept, session: SessionDep) -> Message:
+    """Set a password and join the team; then sign in as usual."""
+    await team.accept_invite(session, data.token, data.password, data.full_name)
+    return Message(message="Welcome to the team. Sign in with your email and new password.")

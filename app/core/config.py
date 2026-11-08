@@ -1,0 +1,193 @@
+"""Application settings, loaded from the environment (and a local `.env` file)."""
+
+from functools import lru_cache
+from typing import Annotated, Literal, Self
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+SMTP_IMPLICIT_TLS_PORT = 465
+MIN_PRODUCTION_SECRET_LENGTH = 32
+_ASYNC_SCHEME = "postgresql+asyncpg://"
+_REWRITTEN_SCHEMES = ("postgres://", "postgresql://")
+# Loopback names stay trusted so the container health check can reach the API.
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1")
+
+CommaSeparated = Annotated[list[str], NoDecode]
+
+
+class Settings(BaseSettings):
+    """Every runtime setting; `.env.example` documents each variable."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    environment: Literal["development", "production", "test"] = "development"
+    debug: bool = False
+    secret_key: str
+    database_url: str
+    cors_origins: CommaSeparated = []
+    allowed_hosts: CommaSeparated = ["*"]
+    frontend_url: str = "http://localhost:3000"
+    # Where the API reaches the website server-side to refresh its cache after edits
+    # (e.g. http://frontend:3000 on the Docker network). Blank uses FRONTEND_URL.
+    frontend_internal_url: str | None = None
+    # Public URL of the Dashboard app (installer and admin back office), for email links.
+    dashboard_url: str = "http://localhost:5173"
+    # The Dashboard keeps its refresh token in an httpOnly cookie set by this API.
+    # "lax" works when the Dashboard and API share a site (e.g. *.pickasparky.co.uk);
+    # use "none" only if they are on unrelated domains (requires HTTPS).
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    session_cookie_domain: str | None = None
+    internal_api_key: str | None = None
+    # Load the illustrative showcase profiles and reviews in production (staging demos only).
+    seed_showcase: bool = False
+    docs_enabled: bool | None = None
+
+    access_token_expire_minutes: int = Field(default=15, ge=1)
+    refresh_token_expire_days: int = Field(default=30, ge=1)
+
+    # Customer magic links and the session they start (see services/customers.py).
+    magic_link_expire_minutes: int = Field(default=24 * 60, ge=5)
+    customer_session_idle_days: int = Field(default=30, ge=1)
+    customer_session_max_days: int = Field(default=90, ge=1)
+
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = False
+    smtp_start_tls: bool = True
+    email_from: str = "no-reply@pickasparky.co.uk"
+    email_from_name: str = "PickASparky"
+    support_email: str = "hello@pickasparky.co.uk"
+
+    cloudinary_cloud_name: str | None = None
+    cloudinary_api_key: str | None = None
+    cloudinary_api_secret: str | None = None
+    cloudinary_folder: str = "pickasparky"
+
+    # Stripe credentials only. Plans and their prices live in the database (Dashboard,
+    # Plans & billing) and are mirrored to Stripe, so no price ids are configured here.
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+
+    rate_limit_storage_uri: str = "memory://"
+    postcodes_api_url: str = "https://api.postcodes.io"
+    max_quote_matches: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("cors_origins", "allowed_hosts", mode="before")
+    @classmethod
+    def _split_comma_separated(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator(
+        "internal_api_key",
+        "smtp_host",
+        "smtp_username",
+        "smtp_password",
+        "cloudinary_cloud_name",
+        "cloudinary_api_key",
+        "cloudinary_api_secret",
+        "stripe_secret_key",
+        "stripe_webhook_secret",
+        "docs_enabled",
+        "session_cookie_domain",
+        "frontend_internal_url",
+        mode="before",
+    )
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """Treat `KEY=` lines copied from `.env.example` as "not configured"."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("database_url")
+    @classmethod
+    def _use_asyncpg_driver(cls, value: str) -> str:
+        """Accept the plain `postgres://` / `postgresql://` form that Coolify hands out."""
+        for scheme in _REWRITTEN_SCHEMES:
+            if value.startswith(scheme):
+                return _ASYNC_SCHEME + value.removeprefix(scheme)
+        if not value.startswith(_ASYNC_SCHEME):
+            raise ValueError("DATABASE_URL must be a PostgreSQL URL")
+        return value
+
+    @field_validator("frontend_url", "dashboard_url", "postcodes_api_url")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> Self:
+        if self.is_production and len(self.secret_key) < MIN_PRODUCTION_SECRET_LENGTH:
+            raise ValueError(
+                f"SECRET_KEY must be at least {MIN_PRODUCTION_SECRET_LENGTH} characters "
+                "in production"
+            )
+        if self.is_production and not self.internal_api_key:
+            # Without it every visitor shares the frontend server's IP address, so the
+            # public-form rate limits would throttle the whole site as one client.
+            raise ValueError("INTERNAL_API_KEY is required in production")
+        if self.smtp_use_tls and self.smtp_start_tls:
+            raise ValueError("SMTP_USE_TLS and SMTP_START_TLS are mutually exclusive")
+        if self.smtp_host and self.smtp_port == SMTP_IMPLICIT_TLS_PORT and not self.smtp_use_tls:
+            # The server speaks TLS from the first byte on this port, so a plain connection
+            # (even one that would upgrade with STARTTLS) is dropped: "Unexpected EOF".
+            raise ValueError(
+                "SMTP_PORT=465 needs SMTP_USE_TLS=true and SMTP_START_TLS=false "
+                "(or use port 587 with SMTP_START_TLS=true)"
+            )
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def docs_are_enabled(self) -> bool:
+        """`DOCS_ENABLED` wins when set; otherwise docs are on everywhere except production."""
+        if self.docs_enabled is not None:
+            return self.docs_enabled
+        return not self.is_production
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        if "*" in self.allowed_hosts:
+            return ["*"]
+        return [*self.allowed_hosts, *(h for h in _LOOPBACK_HOSTS if h not in self.allowed_hosts)]
+
+    @property
+    def rate_limit_enabled(self) -> bool:
+        return self.environment != "test"
+
+    @property
+    def smtp_configured(self) -> bool:
+        return self.smtp_host is not None
+
+    @property
+    def cloudinary_configured(self) -> bool:
+        return all(
+            (self.cloudinary_cloud_name, self.cloudinary_api_key, self.cloudinary_api_secret)
+        )
+
+    @property
+    def stripe_configured(self) -> bool:
+        """The secret key is enough to call Stripe (checkout, plan changes, price sync)."""
+        return bool(self.stripe_secret_key)
+
+    @property
+    def stripe_webhook_configured(self) -> bool:
+        return bool(self.stripe_webhook_secret)
+
+    @property
+    def plan_refresh_enabled(self) -> bool:
+        """Workers re-read the plan catalogue periodically so an edit reaches all of them."""
+        return self.environment != "test"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

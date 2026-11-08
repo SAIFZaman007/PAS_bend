@@ -1,0 +1,39 @@
+"""The `/api/v1` router."""
+
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import (
+    admin,
+    auth,
+    billing,
+    blog,
+    contact,
+    content,
+    conversation_links,
+    customer,
+    health,
+    installers,
+    locations,
+    plans,
+    quotes,
+    reviews,
+)
+
+api_router = APIRouter()
+for module in (
+    health,
+    auth,
+    installers,
+    locations,
+    plans,
+    quotes,
+    reviews,
+    contact,
+    content,
+    conversation_links,
+    customer,
+    blog,
+    billing,
+    admin,
+):
+    api_router.include_router(module.router)

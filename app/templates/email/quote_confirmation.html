@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "_macros.html" import answers_table, button %}
+{% block content %}
+<p style="margin:0 0 16px;">Hi {{ first_name }},</p>
+<p style="margin:0 0 16px;">Thanks for your EV charger quote request. Your reference is <strong>{{ reference }}</strong>.</p>
+<p style="margin:0 0 16px;">We've received your enquiry, and it's on its way to qualified, vetted electricians in your area who can provide you with a quote.</p>
+<p style="margin:0 0 16px;">We'll email you as soon as an installer responds.</p>
+{% if link %}
+<p style="margin:0 0 4px;">You can also view your quotes, check for updates and communicate with installers through your personal PickASparky dashboard using the secure link below.</p>
+{{ button(link, "View My Quotes") }}
+<p style="margin:0 0 16px;font-size:13px;color:#5b6b7d;">This secure link signs you in automatically and works for {{ hours }} hours. After that, you can ask for a new one at any time.</p>
+{% endif %}
+<p style="margin:0;">Here is what you told us:</p>
+{{ answers_table(answers) }}
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% from "_macros.html" import button %}
+{% block content %}
+<p style="margin:0 0 16px;">Hello,</p>
+<p style="margin:0 0 16px;">A new customer enquiry matches your service area!</p>
+<p style="margin:0 0 16px;">{{ first_name }} is looking for a qualified electrician to {{ job }}. Here are the details:</p>
+<p style="margin:0 0 16px;">
+  <strong>Customer:</strong> {{ first_name }}<br>
+  <strong>Location:</strong> {{ location }}<br>
+  <strong>Service:</strong> {{ service }}<br>
+  <strong>Preferred installation timeframe:</strong> {{ timeframe }}
+</p>
+<p style="margin:0 0 16px;"><strong><em>Interested in this job?</em></strong></p>
+<p style="margin:0;">Respond to {{ first_name }} as soon as possible.<br>We accept a maximum of {{ max_quotes }} installer quotes per enquiry, so early responses are encouraged.</p>
+{{ button(url, "View Enquiry & Respond") }}
+<p style="margin:0;">Best regards,<br>The PickASparky Team</p>
+{% endblock %}

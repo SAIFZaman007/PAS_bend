@@ -1,0 +1,27 @@
+{% if invited %}
+Hello {{ name }},
+
+Welcome to PickASparky!
+
+Your free installer profile has been created on PickASparky, the UK marketplace connecting homeowners with qualified electricians.
+
+Your business can now be discovered by homeowners searching for installation services in your area.
+
+Claim your profile to update your business details, showcase your accreditations, add photos and services, and start receiving enquiries from potential customers.
+{% else %}
+Hello,
+
+We received a request to claim the PickASparky listing for {{ business_name }}. Set a password to take it over.
+{% endif %}
+
+Claim your listing:
+{{ link }}
+
+The link is valid for 72 hours.
+
+See your listing: {{ profile_url }}
+
+Claiming is free. If this email was not meant for you, you can ignore it{% if invited %} or reply to have the listing removed{% endif %}.
+
+PickASparky
+{{ support_email }}

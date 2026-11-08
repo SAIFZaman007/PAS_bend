@@ -1,0 +1,20 @@
+Hello,
+
+A new customer enquiry matches your service area!
+
+{{ first_name }} is looking for a qualified electrician to {{ job }}. Here are the details:
+
+Customer: {{ first_name }}
+Location: {{ location }}
+Service: {{ service }}
+Preferred installation timeframe: {{ timeframe }}
+
+Interested in this job?
+
+Respond to {{ first_name }} as soon as possible.
+We accept a maximum of {{ max_quotes }} installer quotes per enquiry, so early responses are encouraged.
+
+View Enquiry & Respond: {{ url }}
+
+Best regards,
+The PickASparky Team
