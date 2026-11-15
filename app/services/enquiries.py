@@ -1,4 +1,5 @@
-"""Enquiries sent from the "Request a Quote" form on an installer's profile.
+"""
+Enquiries sent from the "Request a Quote" form on an installer's profile.
 
 Every approved installer's profile has the form. Where the request goes depends on the
 plan: Pro and Premium installers receive it themselves (their plan includes enquiries);

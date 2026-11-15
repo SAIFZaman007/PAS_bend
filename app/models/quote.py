@@ -1,4 +1,6 @@
-"""Customer quote requests and the leads they generate for installers."""
+"""
+Customer quote requests and the leads they generate for installers.
+"""
 
 import uuid
 from datetime import datetime

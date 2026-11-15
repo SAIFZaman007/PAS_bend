@@ -1,4 +1,6 @@
-"""The back office's Overview, sidebar badges and global search."""
+"""
+The back office's Overview, sidebar badges and global search.
+"""
 
 from datetime import date, timedelta
 

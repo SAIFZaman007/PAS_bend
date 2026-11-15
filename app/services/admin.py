@@ -1,5 +1,7 @@
-"""Back-office use cases: installers (moderation, adding, editing), reviews, quote requests
-(progress, choosing installers for held requests) and the platform's configuration status."""
+"""
+Back-office use cases: installers (moderation, adding, editing), reviews, quote requests
+(progress, choosing installers for held requests) and the platform's configuration status.
+"""
 
 import uuid
 from collections.abc import Sequence

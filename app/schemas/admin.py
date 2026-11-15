@@ -1,4 +1,6 @@
-"""Admin request and response bodies."""
+"""
+Admin request and response bodies.
+"""
 
 import uuid
 from datetime import date, datetime

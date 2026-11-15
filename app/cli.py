@@ -1,4 +1,6 @@
-"""Operational commands: `python -m app.cli <command>`."""
+"""
+Operational commands: `python -m app.cli <command>`.
+"""
 
 import argparse
 import asyncio

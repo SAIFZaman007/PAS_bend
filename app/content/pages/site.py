@@ -1,4 +1,6 @@
-"""Site-wide content: footer, contact details, the shared directory and reviews blocks."""
+"""
+Site-wide content: footer, contact details, the shared directory and reviews blocks.
+"""
 
 from app.content.fields import Document, email, link, paragraph, section, text
 

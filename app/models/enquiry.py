@@ -1,4 +1,6 @@
-"""Enquiries sent from the "Request a Quote" form on an installer's profile."""
+"""
+Enquiries sent from the "Request a Quote" form on an installer's profile.
+"""
 
 import uuid
 

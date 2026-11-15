@@ -1,4 +1,5 @@
-"""Back-office endpoints for the PickASparky team.
+"""
+Back-office endpoints for the PickASparky team.
 
 Every route checks the signed-in team member's staff role against the role matrix (see
 `require_admin_access` and `app/core/permissions.py`). Changes that show on the public

@@ -1,9 +1,11 @@
-"""Transactional email: Jinja2 templates rendered to multipart messages, sent over SMTP.
+"""
+Transactional email: Jinja2 templates rendered to multipart messages, sent over SMTP.
 
 Use cases build `Email` values; endpoints queue them on `BackgroundTasks` once the
 transaction has committed. Sending never raises into a request.
 """
 
+import dataclasses
 import logging
 import re
 import uuid
@@ -13,13 +15,14 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import format_datetime, formataddr, make_msgid
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import aiosmtplib
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from app.core.config import Settings, get_settings
 from app.core.enums import Service
+from app.core.names import given_name
 from app.models import (
     ContactMessage,
     Conversation,
@@ -31,6 +34,9 @@ from app.models import (
     User,
 )
 from app.services.geocoding import outward_code
+
+if TYPE_CHECKING:
+    from app.services.platform import PlatformSettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,23 @@ class Email:
 
 class EmailSender(Protocol):
     async def send(self, email: Email) -> None: ...
+
+
+def for_delivery(email: Email, platform: PlatformSettings) -> Email | None:
+    """Apply the Settings page to an email on its way out, or `None` to drop it.
+
+    The platform name is the sender, the support address receives team alerts (which are
+    dropped while email alerts are off) and is the address shown in every email.
+    """
+    if email.team and not platform.notifications.email_alerts:
+        return None
+    organisation = platform.organisation
+    return dataclasses.replace(
+        email,
+        to=organisation.support_email if email.team else email.to,
+        from_name=email.from_name or organisation.platform_name,
+        context={"support_email": organisation.support_email, **email.context},
+    )
 
 
 class SmtpEmailSender:
@@ -342,7 +365,7 @@ def new_lead(
         subject=f"New Customer Enquiry : {service.label} in {location}",
         template="new_lead",
         context={
-            "first_name": quote.first_name,
+            "first_name": given_name(quote.first_name),
             "location": location,
             "service": service.label,
             "job": _job_phrase(service),
@@ -353,8 +376,14 @@ def new_lead(
     )
 
 
-def quote_unmatched(quote: QuoteRequest, *, held: bool = False) -> Email:
-    """Team alert: a request matched nobody, or (`held`) waits for the team to choose."""
+def quote_unmatched(
+    quote: QuoteRequest, *, held: bool = False, postcode_unknown: bool = False
+) -> Email:
+    """Team alert: a request matched nobody, or (`held`) waits for the team to choose.
+
+    `postcode_unknown`: the lookup answered, and does not know the postcode (as opposed to
+    no installer covering it).
+    """
     return Email(
         to=get_settings().support_email,
         subject=(
@@ -369,6 +398,34 @@ def quote_unmatched(quote: QuoteRequest, *, held: bool = False) -> Email:
             "reference": quote.reference,
             "answers": quote_summary(quote),
             "geocoded": quote.latitude is not None,
+            "postcode_unknown": postcode_unknown,
+            "customer": {
+                "first_name": quote.first_name,
+                "email": quote.email,
+                "phone": quote.phone,
+            },
+        },
+        reply_to=quote.email,
+        team=True,
+    )
+
+
+def quote_awaiting_location(quote: QuoteRequest) -> Email:
+    """Team alert: the postcode lookup was down, so the request has not been matched yet.
+
+    The homeowner is told nothing (they get the usual confirmation). The request is matched
+    automatically once the lookup answers; until then the team can choose installers
+    themselves from the dashboard.
+    """
+    return Email(
+        to=get_settings().support_email,
+        subject=f"Quote request {quote.reference} is waiting for the postcode lookup",
+        template="quote_awaiting_location",
+        context={
+            "link": _dashboard_url(f"/leads?open={quote.id}"),
+            "reference": quote.reference,
+            "postcode": quote.postcode,
+            "answers": quote_summary(quote),
             "customer": {
                 "first_name": quote.first_name,
                 "email": quote.email,
@@ -383,16 +440,17 @@ def quote_unmatched(quote: QuoteRequest, *, held: bool = False) -> Email:
 def installer_enquiry(enquiry: InstallerEnquiry, installer: Installer, to: str) -> Email:
     """A customer's direct request, sent to the installer.
 
-    The customer's email address and phone number are left out (and no Reply-To): the
-    installer answers from their dashboard, where the customer is emailed on their behalf.
+    The customer's email address and phone number are left out (and no Reply-To), and so is
+    their surname: the installer answers from their dashboard, where the customer is emailed
+    on their behalf.
     """
     return Email(
         to=to,
-        subject=f"New quote request from {enquiry.name}",
+        subject=f"New quote request from {given_name(enquiry.name)}",
         template="installer_enquiry",
         context={
             "business_name": installer.business_name,
-            "customer": {"name": enquiry.name},
+            "customer": {"name": given_name(enquiry.name)},
             "message": enquiry.message,
             "link": _dashboard_url("/leads"),
         },
@@ -610,11 +668,11 @@ def conversation_offer_to_homeowner(
 def conversation_reply_to_installer(conversation: Conversation, body: str, to: str) -> Email:
     return Email(
         to=to,
-        subject=f"New message from {conversation.homeowner_name}",
+        subject=f"New message from {given_name(conversation.homeowner_name)}",
         template="conversation_reply",
         context={
             "business_name": conversation.installer.business_name,
-            "name": conversation.homeowner_name,
+            "name": given_name(conversation.homeowner_name),
             "body": body,
             "link": installer_conversation_url(conversation.id),
         },
@@ -623,16 +681,16 @@ def conversation_reply_to_installer(conversation: Conversation, body: str, to: s
 
 def offer_response_to_installer(conversation: Conversation, offer: Offer, to: str) -> Email:
     accepted = offer.status.value == "accepted"
+    homeowner = given_name(conversation.homeowner_name)
     return Email(
         to=to,
         subject=(
-            f"{conversation.homeowner_name} {'accepted' if accepted else 'declined'} "
-            f"quote {offer.reference}"
+            f"{homeowner} has {'accepted' if accepted else 'declined'} your quote {offer.reference}"
         ),
         template="offer_response",
         context={
             "business_name": conversation.installer.business_name,
-            "name": conversation.homeowner_name,
+            "name": homeowner,
             "accepted": accepted,
             "reference": offer.reference,
             "amount": f"£{offer.amount:,.2f}",
@@ -647,22 +705,24 @@ def conversation_team_message(
 ) -> Email:
     """The PickASparky team added a message to a conversation (sent to both sides)."""
     homeowner = audience == "homeowner"
+    # The installer reads about the homeowner by first name only.
+    homeowner_name = (
+        conversation.homeowner_name if homeowner else given_name(conversation.homeowner_name)
+    )
     return Email(
         to=to,
         subject=(
             "A message from PickASparky about your quote from "
             f"{conversation.installer.business_name}"
             if homeowner
-            else f"A message from PickASparky about {conversation.homeowner_name}'s request"
+            else f"A message from PickASparky about {homeowner_name}'s request"
         ),
         template="conversation_team_message",
         context={
             "name": conversation.homeowner_name
             if homeowner
             else conversation.installer.business_name,
-            "other_party": conversation.installer.business_name
-            if homeowner
-            else conversation.homeowner_name,
+            "other_party": conversation.installer.business_name if homeowner else homeowner_name,
             "body": body,
             "link": link,
         },

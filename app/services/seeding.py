@@ -1,4 +1,5 @@
-"""Reference data, content and the development-only demo accounts.
+"""
+Reference data, content and the development-only demo accounts.
 
 - Locations are upserted on every start-up (`seed-locations`).
 - Content (blog articles, the client's directory of EV installers, showcase profiles) is

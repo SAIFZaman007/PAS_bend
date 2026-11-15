@@ -1,4 +1,5 @@
-"""Platform-wide settings the admin edits (Settings): matching, notifications, organisation.
+"""
+Platform-wide settings the admin edits (Settings): matching, notifications, organisation.
 
 Defaults come from the environment (`MAX_QUOTE_MATCHES`, `SUPPORT_EMAIL`...), so a fresh
 install behaves exactly as configured; once an admin saves Settings, the stored values
