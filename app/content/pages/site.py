@@ -38,7 +38,7 @@ SITE = Document(
             email(
                 "privacy_email",
                 "Privacy email",
-                "privacy@pickasparky.co.uk",
+                "notifications@pickasparky.com",
                 help="For data protection requests (Privacy Policy). The support email is set "
                 "in Settings › Organisation.",
             ),

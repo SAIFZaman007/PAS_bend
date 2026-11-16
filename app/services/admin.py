@@ -600,7 +600,7 @@ def platform_status(settings: Settings) -> PlatformStatus:
         image_uploads_configured=settings.cloudinary_configured,
         payments_configured=settings.stripe_configured,
         sms_configured=False,
-        showcase_enabled=settings.seed_showcase,
+        showcase_enabled=not settings.is_production,
     )
 
 
