@@ -77,6 +77,10 @@ class QuoteRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     ip_hash: Mapped[str] = mapped_column(String(64), index=True)
+    # Set when the team archives the request: it leaves the Leads & Quotes list and the
+    # "needs attention" counts but is kept (and can be restored). Installers and the
+    # homeowner are not affected.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     # The customer record (one per email address) that owns this request.
     customer_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("customers.id", ondelete="SET NULL"), index=True

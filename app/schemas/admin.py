@@ -320,6 +320,8 @@ class AdminQuote(BaseModel):
     phone: str | None
     target_installer_id: uuid.UUID | None
     created_at: datetime
+    # When the team archived it (hidden from the main list, kept), else None.
+    archived_at: datetime | None = None
     # Progress (see `services/lead_stats.py`).
     stage: str = "open"
     installers_matched: int = 0
@@ -475,6 +477,8 @@ class StageCounts(BaseModel):
     closed: int
     # Waiting for the team to choose installers (automatic matching off).
     held: int
+    # Archived requests, which are not counted in any of the above.
+    archived: int = 0
 
 
 class TeamMessageCreate(BaseModel):
